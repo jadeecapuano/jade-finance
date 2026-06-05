@@ -14,8 +14,22 @@ async function req(method, path, body) {
 
 export const api = {
   health:          ()       => req('GET',  '/health'),
-  search: ({query, limit=12, condition='new'}) =>
-    req('GET', `/api/search?q=${encodeURIComponent(query)}&limit=${limit}&condition=${condition}`),
+  search: async ({query, limit=12}) => {
+    const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`ML API error ${res.status}`);
+    const data = await res.json();
+    const results = (data.results || []).map(item => ({
+      id: item.id, title: item.title, price: item.price,
+      currency: item.currency_id || 'BRL', condition: item.condition,
+      thumbnail: item.thumbnail, link: item.permalink,
+      seller: item.seller?.nickname, sold: item.sold_quantity || 0,
+      rating: item.reviews?.rating_average || 0,
+    }));
+    const sorted = [...results].sort((a, b) => a.price - b.price);
+    return { results, alternatives: sorted.slice(0, 4),
+             total: data.paging?.total || 0, query };
+  },
   cnpj:            (cnpj)   => req('GET',  `/api/cnpj/${cnpj}`),
   ocr:             (data)   => req('POST', '/api/ocr', data),
   saveTransactions:(data)   => req('POST', '/api/transactions/save', data),
