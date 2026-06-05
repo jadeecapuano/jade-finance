@@ -14,7 +14,8 @@ async function req(method, path, body) {
 
 export const api = {
   health:          ()       => req('GET',  '/health'),
-  search:          (data)   => req('POST', '/api/search', data),
+  search: ({query, limit=12, condition='new'}) =>
+    req('GET', `/api/search?q=${encodeURIComponent(query)}&limit=${limit}&condition=${condition}`),
   cnpj:            (cnpj)   => req('GET',  `/api/cnpj/${cnpj}`),
   ocr:             (data)   => req('POST', '/api/ocr', data),
   saveTransactions:(data)   => req('POST', '/api/transactions/save', data),
