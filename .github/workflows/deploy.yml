@@ -43,7 +43,8 @@ jobs:
           [ -f manifest.json ]      && mv manifest.json public/
 
       - name: Instalar dependências
-        run: npm install --legacy-peer-deps
+        run: npm install --force
+          npm install ajv@^8.0.1 ajv-keywords@^5.0.0 --force
 
       - name: Construir o app
         run: npm run build
