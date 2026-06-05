@@ -13,8 +13,11 @@ app = FastAPI(title="Jade Finance API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
 )
 
 # ═══════════════════════════════════════════
@@ -70,6 +73,35 @@ def financial_month_name() -> str:
 @app.get("/health")
 def health():
     return {"status": "ok", "ts": datetime.now().isoformat()}
+
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(rest_of_path: str):
+    return {"status": "ok"}
+
+@app.get("/api/search")
+def search_products_get(q: str, limit: int = 12, condition: str = "new"):
+    """GET version for simple searches (no CORS preflight)"""
+    params = {"q": q, "limit": limit, "condition": condition}
+    r = requests.get("https://api.mercadolibre.com/sites/MLB/search",
+                     params=params, timeout=10)
+    if r.status_code != 200:
+        raise HTTPException(502, "Erro na API do Mercado Livre")
+    data = r.json()
+    results = []
+    for item in data.get("results", []):
+        rep = item.get("seller", {}).get("seller_reputation", {})
+        results.append({
+            "id": item["id"], "title": item["title"], "price": item["price"],
+            "currency": item.get("currency_id", "BRL"),
+            "condition": item.get("condition"),
+            "thumbnail": item.get("thumbnail"), "link": item.get("permalink"),
+            "seller": item.get("seller", {}).get("nickname"),
+            "sold": item.get("sold_quantity", 0),
+            "rating": item.get("reviews", {}).get("rating_average", 0),
+        })
+    sorted_results = sorted(results, key=lambda x: x["price"])
+    return {"results": results, "alternatives": sorted_results[:4],
+            "total": data.get("paging", {}).get("total", 0), "query": q}
 
 # ═══════════════════════════════════════════
 # BUSCA DE PRODUTOS — Mercado Livre
