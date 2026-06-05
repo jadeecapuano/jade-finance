@@ -2,17 +2,17 @@ import { useState, useEffect } from 'react';
 import { api } from '../api';
 
 const MASLOW = [
-  { nivel:1, icon:'🔴', nome:'Urgência',      cor:'#EF4444', bg:'#FFF1F2',
-    analise:'Compra justificada mesmo com orçamento apertado.',
-    desafio: null },
+  { nivel:1, icon:'🔴', nome:'Urgência',       cor:'#EF4444', bg:'#FFF1F2',
+    analise:'Compra justificada mesmo com o mês apertado.',
+    desafio:null },
   { nivel:2, icon:'🟠', nome:'Trabalho/Saúde', cor:'#F97316', bg:'#FFF7ED',
     analise:'Impacto direto na sua renda ou saúde. Vale priorizar.',
-    desafio: null },
+    desafio:null },
   { nivel:3, icon:'🟡', nome:'Conexão',        cor:'#EAB308', bg:'#FEFCE8',
-    analise:'Compra relacional. Analise se o valor está dentro do confortável.',
-    desafio:'Existe uma opção mais acessível com o mesmo valor afetivo?' },
+    analise:'Compra relacional. Analise se está dentro do confortável.',
+    desafio:'Existe uma opção mais acessível com o mesmo efeito?' },
   { nivel:4, icon:'🟢', nome:'Crescimento',    cor:'#22C55E', bg:'#F0FDF4',
-    analise:'Investimento em você. Ótimo — mas verifique o momento financeiro.',
+    analise:'Investimento em você. Verifique se o momento permite.',
     desafio:'Tem versão mais acessível ou gratuita?' },
   { nivel:5, icon:'🔵', nome:'Prazer/Status',  cor:'#3B82F6', bg:'#EFF6FF',
     analise:'Desejo legítimo. Considerando suas metas, avalie o momento.',
@@ -20,61 +20,79 @@ const MASLOW = [
 ];
 
 const LIVELO = [
-  { nome:'Mag. Luiza',  pts:2.0 }, { nome:'Casas Bahia', pts:2.0 },
-  { nome:'Ponto',       pts:2.0 }, { nome:'Amazon',      pts:1.5 },
-  { nome:'Americanas',  pts:1.5 }, { nome:'Kabum',       pts:1.0 },
-  { nome:'ML',          pts:1.0 }, { nome:'Shopee',      pts:0.5 },
+  {nome:'Mag. Luiza', pts:2.0}, {nome:'Casas Bahia', pts:2.0},
+  {nome:'Ponto',      pts:2.0}, {nome:'Amazon',      pts:1.5},
+  {nome:'Americanas', pts:1.5}, {nome:'Kabum',       pts:1.0},
+  {nome:'ML',         pts:1.0}, {nome:'Shopee',      pts:0.5},
 ];
 
 function fmt(v) {
-  return 'R$ ' + Number(v).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  return 'R$ ' + Number(v).toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 
 export default function Compras() {
-  const [query, setQuery]         = useState('');
-  const [preco, setPreco]         = useState('');
-  const [parcelas, setParcelas]   = useState(1);
-  const [maslow, setMaslow]       = useState(null);
-  const [isRepos, setIsRepos]     = useState(false);
-  const [results, setResults]     = useState(null);
-  const [loading, setLoading]     = useState(false);
-  const [config, setConfig]       = useState(null);
-  const [showBuy, setShowBuy]     = useState(false);
-  const [buyForm, setBuyForm]     = useState({
-    store:'', valuePaid:'', payment:'pix', installments:1,
+  const [produto, setProduto]   = useState('');
+  const [preco, setPreco]       = useState('');
+  const [parcelas, setParcelas] = useState(1);
+  const [maslow, setMaslow]     = useState(null);
+  const [isRepos, setIsRepos]   = useState(false);
+  const [config, setConfig]     = useState(null);
+  const [showBuy, setShowBuy]   = useState(false);
+  const [buyForm, setBuyForm]   = useState({
+    store:'', payment:'pix', installments:1,
     category:'Outros', impulse:false, needLevel:'media', notes:''
   });
-  const [savedMsg, setSavedMsg]   = useState('');
+  const [savedMsg, setSavedMsg] = useState('');
 
-  useEffect(() => { api.config().then(r => setConfig(r.config)).catch(() => {}); }, []);
-
-  function search() {
-    if (!query.trim()) return;
-    // Abre busca em sites externos em novas abas
-    const q = encodeURIComponent(query);
-    window.open(`https://www.zoom.com.br/busca/?q=${q}`, '_blank');
-    window.open(`https://www.google.com/search?tbm=shop&q=${q}`, '_blank');
-    setResults({ external: true, query });
-  }
+  useEffect(() => {
+    api.config().then(r => setConfig(r.config)).catch(() => {});
+  }, []);
 
   const cfg     = config || {};
-  const dispMes = (cfg.renda_mensal||7364) - 4000 - (cfg.budget_var||1000); // simplified
+  const renda   = cfg.renda_mensal || 7364;
+  const budVar  = cfg.budget_var   || 1000;
+  const fixos   = (cfg.limite_inter_bloqueado || 7141) + (cfg.assinaturas_total || 937);
+  const dispMes = Math.max(0, renda - fixos - budVar);
   const dispInt = Math.max(0, (cfg.limite_inter_total||11370) - (cfg.limite_inter_bloqueado||7141) - (cfg.assinaturas_total||937));
   const p       = Number(preco) || 0;
   const parcelaMensal = p > 0 && parcelas > 1 ? p / parcelas : p;
 
-  let viabilidade = null, pagRec = null;
+  // Análise financeira
+  let analise = null;
   if (p > 0) {
     const ratio = p / Math.max(dispMes, 1);
-    if (ratio > 0.6) viabilidade = { label:'Alto impacto', color:'var(--red)', bg:'var(--red-light)' };
-    else if (ratio > 0.3) viabilidade = { label:'Impacto moderado', color:'var(--amber)', bg:'var(--amber-light)' };
-    else viabilidade = { label:'Baixo impacto', color:'var(--green)', bg:'var(--green-light)' };
+    const pct   = Math.round(ratio * 100);
+    let veredicto, cls, cor;
+    if (ratio > 0.6) { veredicto='Alto impacto';    cls='bad';   cor='var(--red)';   }
+    else if (ratio > 0.3) { veredicto='Impacto moderado'; cls='warn'; cor='var(--amber)'; }
+    else { veredicto='Baixo impacto';   cls='go';    cor='var(--green)'; }
 
-    if (parcelas > 6) pagRec = { label:`⚠️ ${parcelas}× — verifique juros`, color:'var(--amber)' };
-    else if (p <= 80) pagRec = { label:'PIX — mais simples', color:'var(--green)' };
-    else if (p > dispInt) pagRec = { label:'PIX — limite Inter insuficiente', color:'var(--amber)' };
-    else if (parcelas === 1 && p <= 400) pagRec = { label:'PIX ou 1× no Inter', color:'var(--green)' };
-    else pagRec = { label:`${parcelas}× sem juros no Inter`, color:'var(--green)' };
+    let pagRec, motivo;
+    if (parcelas > 6) {
+      pagRec='⚠️ Parcelamento longo — verifique juros';
+      motivo='Acima de 6× costuma ter juros embutidos. Prefira PIX com desconto.';
+    } else if (p <= 80) {
+      pagRec='PIX';
+      motivo='Valor pequeno — PIX é mais simples e sem usar limite do Inter.';
+    } else if (p > dispInt) {
+      pagRec='PIX — limite do Inter insuficiente';
+      motivo=`Você tem ${fmt(dispInt)} disponível no Inter. Para esta compra, PIX é o melhor caminho.`;
+    } else if (parcelas === 1 && p <= 400) {
+      pagRec='PIX ou 1× no Inter';
+      motivo='Prefira PIX para preservar o limite. Use cartão só se houver benefício.';
+    } else {
+      pagRec=`${parcelas}× sem juros no Inter`;
+      motivo=`Parcela de ${fmt(parcelaMensal)}/mês. Confirme antes que não há juros.`;
+    }
+
+    const mObj = maslow ? MASLOW.find(m => m.nivel === maslow) : null;
+    analise = { veredicto, cls, cor, pct, pagRec, motivo, mObj };
+  }
+
+  function buscarAlternativas() {
+    if (!produto.trim()) return;
+    const q = encodeURIComponent(`${produto} alternativas mais baratas`);
+    window.open(`https://www.google.com/search?q=${q}`, '_blank');
   }
 
   async function savePurchase() {
@@ -83,9 +101,8 @@ export default function Compras() {
     const mObj = maslow ? MASLOW.find(m => m.nivel === maslow) : null;
     try {
       await api.registerPurchase({
-        date: dateStr, item: query,
-        value_searched: Number(results?.results?.[0]?.price || preco),
-        value_paid: Number(buyForm.valuePaid || preco),
+        date: dateStr, item: produto || 'Item',
+        value_searched: p, value_paid: Number(buyForm.valuePaid || preco),
         store: buyForm.store, payment: buyForm.payment,
         installments: Number(buyForm.installments),
         category: buyForm.category,
@@ -102,13 +119,15 @@ export default function Compras() {
   }
 
   return (
-    <div className="scroll fade-in" style={{ padding: 16 }}>
+    <div className="scroll fade-in" style={{ padding:16 }}>
 
-      {/* Financial health mini */}
+      {/* Cards saúde financeira */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:14 }}>
         <div className="card" style={{ padding:'10px 12px' }}>
           <p className="label-sm">disponível mês</p>
-          <p className="val-md indigo">{fmt(Math.max(0, dispMes))}</p>
+          <p className="val-md" style={{ color: dispMes > 500 ? 'var(--green)' : 'var(--amber)' }}>
+            {fmt(dispMes)}
+          </p>
         </div>
         <div className="card" style={{ padding:'10px 12px' }}>
           <p className="label-sm">limite inter livre</p>
@@ -118,85 +137,103 @@ export default function Compras() {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="card" style={{ marginBottom: 14 }}>
-        <p style={{ fontSize:15, fontWeight:700, marginBottom:10 }}>O que você quer comprar?</p>
-        <div style={{ display:'flex', gap:8, marginBottom:10 }}>
-          <input className="input" value={query}
-            onChange={e => setQuery(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && search()}
-            placeholder="Nome do produto..."
-          />
-          <button className="btn btn-primary" onClick={search}
-            style={{ whiteSpace:'nowrap', padding:'10px 14px' }}>
-            Buscar
-          </button>
+      {/* Formulário principal */}
+      <div className="card" style={{ marginBottom:14 }}>
+        <p style={{ fontSize:15, fontWeight:700, marginBottom:12 }}>Analisar uma compra</p>
+
+        <div style={{ marginBottom:10 }}>
+          <p className="label-sm" style={{ marginBottom:4 }}>Nome do produto</p>
+          <input className="input" value={produto}
+            onChange={e => setProduto(e.target.value)}
+            placeholder="Ex: Kerastase Night Sérum, tênis Nike, iPhone..." />
         </div>
+
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
           <div>
-            <p className="label-sm" style={{ marginBottom:4 }}>Preço estimado</p>
+            <p className="label-sm" style={{ marginBottom:4 }}>Preço (R$)</p>
             <input className="input" type="number" value={preco}
-              onChange={e => setPreco(e.target.value)} placeholder="R$ 0,00" />
+              onChange={e => setPreco(e.target.value)} placeholder="0,00" />
           </div>
           <div>
             <p className="label-sm" style={{ marginBottom:4 }}>Parcelas</p>
-            <select className="input" value={parcelas} onChange={e => setParcelas(Number(e.target.value))}>
-              {[1,2,3,4,6,10,12].map(n => <option key={n} value={n}>{n === 1 ? 'À vista' : `${n}×`}</option>)}
+            <select className="input" value={parcelas}
+              onChange={e => setParcelas(Number(e.target.value))}>
+              {[1,2,3,4,6,10,12].map(n =>
+                <option key={n} value={n}>{n === 1 ? 'À vista' : `${n}×`}</option>
+              )}
             </select>
           </div>
         </div>
       </div>
 
-      {/* Reposição toggle */}
+      {/* Busca Google Shopping — antes da análise */}
+      {produto && (
+        <div style={{ display:'flex', gap:8, marginBottom:14 }}>
+          <a href={`https://www.google.com/search?tbm=shop&q=${encodeURIComponent(produto)}`}
+            target="_blank" rel="noreferrer" style={{ flex:1, textDecoration:'none' }}>
+            <button className="btn btn-secondary btn-full" style={{ fontSize:13 }}>
+              Ver preços no Google Shopping ↗
+            </button>
+          </a>
+          <a href={`https://www.zoom.com.br/busca/?q=${encodeURIComponent(produto)}`}
+            target="_blank" rel="noreferrer" style={{ flex:1, textDecoration:'none' }}>
+            <button className="btn" style={{
+              width:'100%', background:'var(--bg)',
+              color:'var(--text-sec)', border:'.5px solid var(--border)', fontSize:13
+            }}>
+              Ver no Zoom ↗
+            </button>
+          </a>
+        </div>
+      )}
+
+      {/* Toggle reposição */}
       <div className="card" style={{
-        marginBottom:14, display:'flex', alignItems:'center', gap:12,
+        marginBottom:14, display:'flex', alignItems:'center', gap:12, cursor:'pointer',
         background: isRepos ? '#F5F3FF' : 'var(--card)',
-        border: isRepos ? '1.5px solid var(--indigo)' : '0.5px solid var(--border)'
+        border: isRepos ? '1.5px solid var(--indigo)' : '.5px solid var(--border)'
       }} onClick={() => setIsRepos(!isRepos)}>
         <span style={{ fontSize:22 }}>🔁</span>
         <div style={{ flex:1 }}>
           <p style={{ fontSize:14, fontWeight:600 }}>É uma reposição de rotina?</p>
-          <p className="caption">Shampoo, suplemento, algo que acabou e precisa repor</p>
+          <p className="caption">Shampoo, suplemento, algo que acabou</p>
         </div>
         <div style={{
           width:24, height:24, borderRadius:12,
           background: isRepos ? 'var(--indigo)' : 'var(--border)',
-          display:'flex', alignItems:'center', justifyContent:'center',
-          transition:'background .2s'
+          display:'flex', alignItems:'center', justifyContent:'center', transition:'background .2s'
         }}>
           {isRepos && <span style={{ color:'#fff', fontSize:14 }}>✓</span>}
         </div>
       </div>
 
-      {/* Maslow selector */}
+      {/* Maslow */}
       {!isRepos && (
         <div className="card" style={{ marginBottom:14 }}>
-          <p style={{ fontSize:13, fontWeight:600, marginBottom:8 }}>
-            Nível de necessidade
-          </p>
+          <p style={{ fontSize:13, fontWeight:600, marginBottom:8 }}>Nível de necessidade</p>
           <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
             {MASLOW.map(m => (
               <div key={m.nivel}
                 onClick={() => setMaslow(maslow === m.nivel ? null : m.nivel)}
                 style={{
-                  display:'flex', alignItems:'center', gap:10,
-                  padding:'10px 12px', borderRadius:10,
+                  display:'flex', alignItems:'center', gap:10, padding:'10px 12px',
+                  borderRadius:10, cursor:'pointer', transition:'all .15s',
                   background: maslow === m.nivel ? m.bg : 'var(--bg)',
                   border: `1.5px solid ${maslow === m.nivel ? m.cor : 'transparent'}`,
-                  cursor:'pointer', transition:'all .15s'
                 }}>
                 <span style={{ fontSize:18 }}>{m.icon}</span>
                 <div style={{ flex:1 }}>
-                  <p style={{ fontSize:13, fontWeight:600, color: maslow === m.nivel ? m.cor : 'var(--text)' }}>
-                    {m.nome}
-                  </p>
+                  <p style={{ fontSize:13, fontWeight:600,
+                    color: maslow === m.nivel ? m.cor : 'var(--text)' }}>{m.nome}</p>
                   {maslow === m.nivel && (
-                    <p style={{ fontSize:11, color:'var(--text-sec)', marginTop:2 }}>{m.analise}</p>
-                  )}
-                  {maslow === m.nivel && m.desafio && (
-                    <p style={{ fontSize:11, color:'var(--text-ter)', marginTop:3, fontStyle:'italic' }}>
-                      💭 {m.desafio}
-                    </p>
+                    <>
+                      <p style={{ fontSize:11, color:'var(--text-sec)', marginTop:2 }}>{m.analise}</p>
+                      {m.desafio && (
+                        <p style={{ fontSize:11, color:'var(--text-ter)', marginTop:3, fontStyle:'italic' }}>
+                          💭 {m.desafio}
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -205,95 +242,90 @@ export default function Compras() {
         </div>
       )}
 
-      {/* Analysis */}
-      {p > 0 && viabilidade && (
+      {/* Análise financeira */}
+      {analise && (
         <div style={{
-          background: viabilidade.bg, borderRadius:14,
-          padding:'14px 16px', marginBottom:14,
-          borderLeft: `4px solid ${viabilidade.color}`
+          background: analise.cls==='go' ? '#ECFDF5' : analise.cls==='warn' ? '#FFFBEB' : '#FFF1F2',
+          borderRadius:14, padding:'16px 18px', marginBottom:14,
+          borderLeft: `4px solid ${analise.cor}`
         }}>
-          <p style={{ fontSize:14, fontWeight:700, color: viabilidade.color, marginBottom:4 }}>
-            {viabilidade.label}
-          </p>
-          <p className="caption" style={{ marginBottom:10 }}>
-            {fmt(p)} representa {Math.round(p/Math.max(dispMes,1)*100)}% do disponível este mês
-          </p>
-          {pagRec && (
+          {/* Maslow context */}
+          {analise.mObj && (
             <div style={{
-              background:'rgba(255,255,255,.65)', borderRadius:10, padding:'10px 12px'
+              background:'rgba(255,255,255,.6)', borderRadius:10, padding:'8px 12px', marginBottom:10
             }}>
-              <p className="label-sm" style={{ marginBottom:3 }}>Melhor forma de pagar</p>
-              <p style={{ fontSize:15, fontWeight:700, color: pagRec.color }}>{pagRec.label}</p>
-              {parcelas > 1 && (
-                <p className="caption" style={{ marginTop:2 }}>
-                  {fmt(parcelaMensal)}/mês por {parcelas} meses
+              <p style={{ fontSize:12, fontWeight:600, color: analise.mObj.cor }}>
+                {analise.mObj.icon} {analise.mObj.nome}
+              </p>
+              <p style={{ fontSize:11, color:'var(--text-sec)', marginTop:2 }}>
+                {analise.mObj.analise}
+              </p>
+              {analise.mObj.desafio && (
+                <p style={{ fontSize:11, color:'var(--text-ter)', marginTop:4, fontStyle:'italic' }}>
+                  💭 {analise.mObj.desafio}
                 </p>
               )}
+            </div>
+          )}
+
+          {/* Veredicto */}
+          <p style={{ fontSize:15, fontWeight:700, color: analise.cor, marginBottom:4 }}>
+            {analise.veredicto} — {analise.pct}% do disponível
+          </p>
+
+          {/* Barra de impacto */}
+          <div style={{ background:'rgba(0,0,0,.08)', borderRadius:6, height:7, marginBottom:10, overflow:'hidden' }}>
+            <div style={{
+              width: Math.min(analise.pct, 100)+'%', height:'100%',
+              background: analise.cor, borderRadius:6, transition:'width .5s'
+            }} />
+          </div>
+
+          {/* Pagamento */}
+          <div style={{
+            background:'rgba(255,255,255,.65)', borderRadius:10, padding:'10px 12px', marginBottom:10
+          }}>
+            <p className="label-sm" style={{ marginBottom:3 }}>Melhor forma de pagar</p>
+            <p style={{ fontSize:15, fontWeight:700, color: analise.cor }}>{analise.pagRec}</p>
+            <p style={{ fontSize:11, color:'var(--text-sec)', marginTop:3 }}>{analise.motivo}</p>
+          </div>
+
+          {/* Livelo */}
+          {p > 0 && (
+            <div>
+              <p className="label-sm" style={{ marginBottom:6 }}>Pontos Livelo por loja</p>
+              <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                {LIVELO.slice(0, 4).map(l => {
+                  const pts = Math.round(p * l.pts);
+                  return (
+                    <div key={l.nome} style={{
+                      display:'flex', justifyContent:'space-between',
+                      background:'rgba(255,255,255,.5)', borderRadius:8, padding:'6px 10px'
+                    }}>
+                      <span style={{ fontSize:12 }}>{l.nome}</span>
+                      <span style={{ fontSize:12, color:'#F97316', fontWeight:600 }}>
+                        {pts} pts ≈ {fmt(pts * 0.01)} de volta
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* Livelo */}
-      {p > 0 && (
-        <div className="card" style={{ marginBottom:14 }}>
-          <p style={{ fontSize:14, fontWeight:700, marginBottom:8 }}>
-            🟠 Pontos Livelo por loja
-          </p>
-          {LIVELO.map(l => {
-            const pts = Math.round(p * l.pts);
-            const efetivo = p - pts * 0.01;
-            return (
-              <div key={l.nome} style={{
-                display:'flex', alignItems:'center', gap:8,
-                padding:'7px 0', borderBottom:'0.5px solid var(--border)'
-              }}>
-                <p style={{ flex:1, fontSize:13, fontWeight:500 }}>{l.nome}</p>
-                <p style={{ fontSize:12, color:'#F97316', fontWeight:600 }}>{pts} pts</p>
-                <p style={{ fontSize:11, color:'var(--green)' }}>≈ {fmt(efetivo)}</p>
-              </div>
-            );
-          })}
-          <p className="caption" style={{ marginTop:8 }}>
-            1 ponto = R$0,01 em resgate básico. Verifique campanhas ativas no app Livelo.
-          </p>
-        </div>
-      )}
+      {/* Botões de ação */}
+      {produto && p > 0 && (
+        <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom:14 }}>
+          {/* Alternativas — só mostra quando impacto é alto OU o produto pode ter similar mais barato */}
+          <button className="btn" style={{
+            background:'var(--green-light)', color:'var(--green)',
+            border:'1.5px solid #6EE7B7', padding:'12px'
+          }} onClick={buscarAlternativas}>
+            Pesquisar alternativas mais baratas no Google ↗
+          </button>
 
-      {/* Search results */}
-      {results?.external && (
-        <div className="card" style={{ marginBottom:14, borderLeft:'4px solid var(--indigo)' }}>
-          <p style={{ fontSize:14, fontWeight:700, marginBottom:6, color:'var(--indigo)' }}>
-            Abrindo comparativo de preços...
-          </p>
-          <p className="caption" style={{ marginBottom:10 }}>
-            Verifique as abas que abriram com os resultados do <strong>Zoom</strong> (histórico de preços) e do <strong>Google Shopping</strong> (todos os sites).
-          </p>
-          <p style={{ fontSize:13, color:'var(--text-sec)' }}>
-            Encontrou o melhor preço? Digite o valor abaixo e veja a análise financeira.
-          </p>
-          <div style={{ display:'flex', gap:8, marginTop:10, flexWrap:'wrap' }}>
-            <a href={`https://www.zoom.com.br/busca/?q=${encodeURIComponent(query)}`}
-               target="_blank" rel="noreferrer"
-               style={{ textDecoration:'none' }}>
-              <div className="pill pill-indigo" style={{ cursor:'pointer', padding:'6px 14px', fontSize:12 }}>
-                Zoom — histórico de preços ↗
-              </div>
-            </a>
-            <a href={`https://www.google.com/search?tbm=shop&q=${encodeURIComponent(query)}`}
-               target="_blank" rel="noreferrer"
-               style={{ textDecoration:'none' }}>
-              <div className="pill pill-gray" style={{ cursor:'pointer', padding:'6px 14px', fontSize:12 }}>
-                Google Shopping ↗
-              </div>
-            </a>
-          </div>
-        </div>
-      )}
-
-      {/* Buy button */}
-      {query && (
-        <div style={{ marginTop: 16 }}>
           <button className="btn btn-primary btn-full"
             onClick={() => setShowBuy(true)}>
             Comprei — registrar na planilha
@@ -303,13 +335,14 @@ export default function Compras() {
 
       {savedMsg && (
         <div style={{
-          background:'var(--green-light)', color:'var(--green)',
-          borderRadius:12, padding:'12px 16px', marginTop:12,
-          fontSize:14, fontWeight:500, textAlign:'center'
+          background: savedMsg.includes('Erro') ? 'var(--red-light)' : 'var(--green-light)',
+          color: savedMsg.includes('Erro') ? 'var(--red)' : 'var(--green)',
+          borderRadius:12, padding:'12px 16px', marginBottom:12,
+          fontSize:14, fontWeight:600, textAlign:'center'
         }}>{savedMsg}</div>
       )}
 
-      {/* Buy form modal */}
+      {/* Modal compra */}
       {showBuy && (
         <div style={{
           position:'fixed', inset:0, background:'rgba(0,0,0,.5)',
@@ -324,14 +357,13 @@ export default function Compras() {
               background:'var(--border)', margin:'0 auto 16px'
             }} />
             <p style={{ fontSize:17, fontWeight:700, marginBottom:16 }}>
-              Registrar compra
+              {produto || 'Registrar compra'}
             </p>
-
             <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
               <div>
-                <p className="label-sm" style={{ marginBottom:4 }}>Valor pago</p>
+                <p className="label-sm" style={{ marginBottom:4 }}>Valor pago (R$)</p>
                 <input className="input" type="number"
-                  value={buyForm.valuePaid}
+                  value={buyForm.valuePaid || preco}
                   onChange={e => setBuyForm({...buyForm, valuePaid:e.target.value})}
                   placeholder={preco || '0,00'} />
               </div>
@@ -339,7 +371,7 @@ export default function Compras() {
                 <p className="label-sm" style={{ marginBottom:4 }}>Loja</p>
                 <input className="input" value={buyForm.store}
                   onChange={e => setBuyForm({...buyForm, store:e.target.value})}
-                  placeholder="Amazon, Magazine Luiza..." />
+                  placeholder="Amazon, Sephora, Beleza na Web..." />
               </div>
               <div>
                 <p className="label-sm" style={{ marginBottom:4 }}>Pagamento</p>
@@ -352,7 +384,7 @@ export default function Compras() {
               </div>
               {buyForm.payment === 'parcelado' && (
                 <div>
-                  <p className="label-sm" style={{ marginBottom:4 }}>Número de parcelas</p>
+                  <p className="label-sm" style={{ marginBottom:4 }}>Parcelas</p>
                   <input className="input" type="number"
                     value={buyForm.installments}
                     onChange={e => setBuyForm({...buyForm, installments:Number(e.target.value)})}
@@ -371,7 +403,7 @@ export default function Compras() {
               <div>
                 <p className="label-sm" style={{ marginBottom:6 }}>Foi por impulso?</p>
                 <div style={{ display:'flex', gap:8 }}>
-                  {[false,true].map(v => (
+                  {[false, true].map(v => (
                     <button key={String(v)}
                       onClick={() => setBuyForm({...buyForm, impulse:v})}
                       className="btn"
@@ -383,7 +415,7 @@ export default function Compras() {
                         color: buyForm.impulse === v
                           ? (v ? 'var(--red)' : 'var(--green)')
                           : 'var(--text-sec)',
-                        border: `1.5px solid ${buyForm.impulse === v ? (v ? 'var(--red)' : 'var(--green)') : 'transparent'}`
+                        border:`1.5px solid ${buyForm.impulse === v ? (v ? 'var(--red)' : 'var(--green)') : 'transparent'}`
                       }}>
                       {v ? 'Sim' : 'Não'}
                     </button>
@@ -395,17 +427,17 @@ export default function Compras() {
                 <textarea className="input"
                   value={buyForm.notes}
                   onChange={e => setBuyForm({...buyForm, notes:e.target.value})}
-                  placeholder="Onde achou, quanto economizou..."
-                  style={{ minHeight:60, resize:'vertical' }} />
+                  placeholder="Onde achou, comparações que fez..."
+                  style={{ minHeight:56, resize:'vertical' }} />
               </div>
             </div>
-
             <button className="btn btn-primary btn-full" style={{ marginTop:16 }}
               onClick={savePurchase}>
               Salvar na planilha
             </button>
-            <button className="btn btn-ghost btn-full" style={{ marginTop:8 }}
-              onClick={() => setShowBuy(false)}>
+            <button className="btn" style={{
+              width:'100%', marginTop:8, background:'var(--bg)', color:'var(--text-sec)'
+            }} onClick={() => setShowBuy(false)}>
               Cancelar
             </button>
           </div>
