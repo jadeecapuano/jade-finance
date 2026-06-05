@@ -48,20 +48,13 @@ export default function Compras() {
 
   useEffect(() => { api.config().then(r => setConfig(r.config)).catch(() => {}); }, []);
 
-  async function search() {
+  function search() {
     if (!query.trim()) return;
-    setLoading(true); setResults(null);
-    try {
-      const data = await api.search({
-        query, limit: 10,
-        min_price: preco ? Number(preco) * 0.3 : undefined,
-        max_price: preco ? Number(preco) * 1.5 : undefined,
-      });
-      setResults(data);
-    } catch {
-      setResults({ error: 'Erro ao buscar. Verifique a conexão.' });
-    }
-    setLoading(false);
+    // Abre busca em sites externos em novas abas
+    const q = encodeURIComponent(query);
+    window.open(`https://www.zoom.com.br/busca/?q=${q}`, '_blank');
+    window.open(`https://www.google.com/search?tbm=shop&q=${q}`, '_blank');
+    setResults({ external: true, query });
   }
 
   const cfg     = config || {};
@@ -268,48 +261,33 @@ export default function Compras() {
       )}
 
       {/* Search results */}
-      {loading && <div className="loading"><div className="spinner"/>Buscando no Mercado Livre...</div>}
-
-      {results?.error && (
-        <div style={{
-          background:'var(--red-light)', borderRadius:12, padding:14,
-          color:'var(--red)', fontSize:13, marginBottom:14
-        }}>{results.error}</div>
-      )}
-
-      {results?.results && (
-        <div>
-          <p style={{ fontSize:15, fontWeight:700, marginBottom:10 }}>
-            {results.total.toLocaleString('pt-BR')} resultados no Mercado Livre
+      {results?.external && (
+        <div className="card" style={{ marginBottom:14, borderLeft:'4px solid var(--indigo)' }}>
+          <p style={{ fontSize:14, fontWeight:700, marginBottom:6, color:'var(--indigo)' }}>
+            Abrindo comparativo de preços...
           </p>
-          {results.results.slice(0,8).map(item => (
-            <a key={item.id} href={item.link} target="_blank" rel="noreferrer"
-              style={{ textDecoration:'none' }}>
-              <div className="card" style={{
-                marginBottom:8, display:'flex', gap:12, alignItems:'center'
-              }}>
-                {item.thumbnail && (
-                  <img src={item.thumbnail} alt="" style={{
-                    width:56, height:56, borderRadius:8, objectFit:'cover', flexShrink:0
-                  }} />
-                )}
-                <div style={{ flex:1, minWidth:0 }}>
-                  <p style={{
-                    fontSize:13, fontWeight:500, overflow:'hidden',
-                    display:'-webkit-box', WebkitLineClamp:2,
-                    WebkitBoxOrient:'vertical'
-                  }}>{item.title}</p>
-                  <p style={{ fontSize:16, fontWeight:700, color:'var(--indigo)', marginTop:3 }}>
-                    {fmt(item.price)}
-                  </p>
-                  {item.sold > 0 && (
-                    <p className="caption">{item.sold} vendidos • {item.seller}</p>
-                  )}
-                </div>
-                <span style={{ fontSize:18, color:'var(--indigo)' }}>›</span>
+          <p className="caption" style={{ marginBottom:10 }}>
+            Verifique as abas que abriram com os resultados do <strong>Zoom</strong> (histórico de preços) e do <strong>Google Shopping</strong> (todos os sites).
+          </p>
+          <p style={{ fontSize:13, color:'var(--text-sec)' }}>
+            Encontrou o melhor preço? Digite o valor abaixo e veja a análise financeira.
+          </p>
+          <div style={{ display:'flex', gap:8, marginTop:10, flexWrap:'wrap' }}>
+            <a href={`https://www.zoom.com.br/busca/?q=${encodeURIComponent(query)}`}
+               target="_blank" rel="noreferrer"
+               style={{ textDecoration:'none' }}>
+              <div className="pill pill-indigo" style={{ cursor:'pointer', padding:'6px 14px', fontSize:12 }}>
+                Zoom — histórico de preços ↗
               </div>
             </a>
-          ))}
+            <a href={`https://www.google.com/search?tbm=shop&q=${encodeURIComponent(query)}`}
+               target="_blank" rel="noreferrer"
+               style={{ textDecoration:'none' }}>
+              <div className="pill pill-gray" style={{ cursor:'pointer', padding:'6px 14px', fontSize:12 }}>
+                Google Shopping ↗
+              </div>
+            </a>
+          </div>
         </div>
       )}
 
