@@ -1,0 +1,58 @@
+name: Build e Deploy — Jade Finance
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Corrigir estrutura de pastas
+        run: |
+          mkdir -p src/components
+          mkdir -p public
+
+          # Mover arquivos para src/
+          [ -f App.jsx ]            && mv App.jsx src/
+          [ -f api.js ]             && mv api.js src/
+          [ -f index.js ]           && mv index.js src/
+          [ -f index.css ]          && mv index.css src/
+
+          # Mover componentes para src/components/
+          [ -f Compras.jsx ]        && mv Compras.jsx src/components/
+          [ -f Configuracoes.jsx ]  && mv Configuracoes.jsx src/components/
+          [ -f Extrato.jsx ]        && mv Extrato.jsx src/components/
+          [ -f Historico.jsx ]      && mv Historico.jsx src/components/
+          [ -f Painel.jsx ]         && mv Painel.jsx src/components/
+          [ -f PIN.jsx ]            && mv PIN.jsx src/components/
+
+          # Mover arquivos públicos
+          [ -f index.html ]         && mv index.html public/
+          [ -f manifest.json ]      && mv manifest.json public/
+
+      - name: Instalar dependências
+        run: npm install --legacy-peer-deps
+
+      - name: Construir o app
+        run: npm run build
+        env:
+          REACT_APP_API_URL: https://jade-finance.onrender.com
+          CI: false
+
+      - name: Publicar no GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: build
+          branch: gh-pages
