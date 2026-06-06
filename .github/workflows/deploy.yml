@@ -37,6 +37,7 @@ jobs:
           [ -f Historico.jsx ]      && mv Historico.jsx src/components/
           [ -f Painel.jsx ]         && mv Painel.jsx src/components/
           [ -f PIN.jsx ]            && mv PIN.jsx src/components/
+          [ -f Wishlist.jsx ]       && mv Wishlist.jsx src/components/
 
           # Mover arquivos públicos
           [ -f index.html ]         && mv index.html public/
