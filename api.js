@@ -38,8 +38,9 @@ export const api = {
   updateConfig:    (cfg)    => req('POST', '/api/config', { config: cfg }),
   registerPurchase:(data)   => req('POST', '/api/purchase', data),
   createAlert:     (data)   => req('POST', '/api/alerts', data),
-  listAlerts:      ()       => req('GET',  '/api/alerts'),
-  readSheet:       (sheet)  => req('GET',  `/api/sheets/${sheet}`),
+  listAlerts:      ()             => req('GET',  '/api/alerts'),
+  readSheet:       (sheet)        => req('GET',  `/api/sheets/${sheet}`),
+  writeSheet:      (sheet, data)  => req('POST', `/api/sheets/${sheet}`, data),
 };
 
 // Warm-up silencioso ao iniciar
