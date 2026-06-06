@@ -6,12 +6,13 @@ import Compras from './components/Compras';
 import Extrato from './components/Extrato';
 import Historico from './components/Historico';
 import Configuracoes from './components/Configuracoes';
+import Wishlist from './components/Wishlist';
 
 const TABS = [
   { id: 'painel',   label: 'Painel',   icon: '⌂' },
   { id: 'compras',  label: 'Compras',  icon: '🛍' },
+  { id: 'wishlist', label: 'Wishlist', icon: '⭐' },
   { id: 'extrato',  label: 'Extrato',  icon: '↑' },
-  { id: 'historico',label: 'Histórico',icon: '◷' },
   { id: 'config',   label: 'Config',   icon: '⚙' },
 ];
 
@@ -26,11 +27,12 @@ export default function App() {
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="scroll">
-        {tab === 'painel'    && <Painel />}
-        {tab === 'compras'   && <Compras />}
-        {tab === 'extrato'   && <Extrato />}
-        {tab === 'historico' && <Historico />}
-        {tab === 'config'    && <Configuracoes />}
+        {tab === 'painel'   && <Painel />}
+        {tab === 'compras'  && <Compras />}
+        {tab === 'wishlist' && <Wishlist />}
+        {tab === 'extrato'  && <Extrato />}
+        {tab === 'historico'&& <Historico />}
+        {tab === 'config'   && <Configuracoes />}
       </div>
 
       <nav className="bottom-nav">
