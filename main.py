@@ -1,313 +1,642 @@
-import { useState } from 'react';
-import { api } from '../api';
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List
+import os, json, base64, uuid, requests
+from datetime import datetime, date
+import gspread
+from google.oauth2.service_account import Credentials
+import anthropic
 
-const KNOWN_SUBS = ['spotify','netflix','disney','amazon prime','youtube','hbo',
-  'globoplay','vidya','wellhub','gympass','anthropic','claude','rappi','ifood',
-  'nubank','apple','microsoft','adobe','canva','notion'];
+app = FastAPI(title="Jade Finance API", version="1.0.0")
 
-const BANCOS = [
-  { id:'inter',  label:'Inter',  color:'#EA580C' },
-  { id:'nubank', label:'Nubank', color:'#7C3AED' },
-  { id:'itau',   label:'Itaú',   color:'#F97316' },
-  { id:'outro',  label:'Outro',  color:'#6B7280' },
-];
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
+)
 
-const CATS = ['Alimentação','Transporte','Saúde','Beleza','Roupas','Lazer',
-              'Suplementos','Tecnologia','Casa','Assinatura','Parcela','Transferência','Outros'];
+# ═══════════════════════════════════════════
+# CONFIG — variáveis de ambiente no Render.com
+# ═══════════════════════════════════════════
+SHEETS_ID          = "1nIyq8C0LTjztxn-4pmzV67w_Lx_sErirWukTmFobIcw"
+ANTHROPIC_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")
+SENDGRID_KEY       = os.environ.get("SENDGRID_API_KEY", "")
+GOOGLE_CREDS_JSON  = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+FROM_EMAIL         = "jadecapuanofotografia@gmail.com"
+SALARY_DAY         = 5   # dia em que o salário cai
 
-export default function Extrato() {
-  const [banco, setBanco]               = useState('inter');
-  const [images, setImages]             = useState([]);   // [{file, preview, banco}]
-  const [loading, setLoading]           = useState(false);
-  const [progress, setProgress]         = useState('');
-  const [transactions, setTransactions] = useState(null);
-  const [saving, setSaving]             = useState(false);
-  const [savedMsg, setSavedMsg]         = useState('');
-  const [error, setError]               = useState('');
+# ═══════════════════════════════════════════
+# GOOGLE SHEETS
+# ═══════════════════════════════════════════
+def sheets():
+    if not GOOGLE_CREDS_JSON:
+        raise HTTPException(500, "Google credentials não configuradas")
+    creds = Credentials.from_service_account_info(
+        json.loads(GOOGLE_CREDS_JSON),
+        scopes=[
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+    )
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(SHEETS_ID)
 
-  function handleFiles(files) {
-    const novos = Array.from(files).map(file => ({
-      file,
-      preview: URL.createObjectURL(file),
-      banco,
-      id: Math.random().toString(36).slice(2)
-    }));
-    setImages(prev => [...prev, ...novos]);
-    setTransactions(null);
-    setError('');
-  }
+def get_or_create_sheet(sh, name: str, headers: list = None):
+    try:
+        ws = sh.worksheet(name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=name, rows=1000, cols=25)
+        if headers:
+            ws.append_row(headers)
+    return ws
 
-  function removeImage(id) {
-    setImages(prev => prev.filter(img => img.id !== id));
-    if (images.length <= 1) setTransactions(null);
-  }
+def financial_month_name() -> str:
+    """Retorna o nome da aba do mês financeiro atual (ciclo começa dia 5)."""
+    now = datetime.now()
+    meses = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+             "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
+    if now.day >= SALARY_DAY:
+        return f"{meses[now.month-1]}{now.year}"
+    else:
+        m = now.month - 1 if now.month > 1 else 12
+        y = now.year if now.month > 1 else now.year - 1
+        return f"{meses[m-1]}{y}"
 
-  function updateImageBanco(id, novoBanco) {
-    setImages(prev => prev.map(img => img.id === id ? {...img, banco: novoBanco} : img));
-  }
+# ═══════════════════════════════════════════
+# HEALTH CHECK (warm-up silencioso do frontend)
+# ═══════════════════════════════════════════
+@app.get("/health")
+def health():
+    return {"status": "ok", "ts": datetime.now().isoformat()}
 
-  async function processAll() {
-    if (!images.length) return;
-    setLoading(true); setError(''); setTransactions(null);
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(rest_of_path: str):
+    return {"status": "ok"}
 
-    const allTransactions = [];
+@app.get("/api/search")
+def search_products_get(q: str, limit: int = 12, condition: str = "new"):
+    """GET version for simple searches (no CORS preflight)"""
+    params = {"q": q, "limit": limit, "condition": condition}
+    r = requests.get("https://api.mercadolibre.com/sites/MLB/search",
+                     params=params, timeout=10)
+    if r.status_code != 200:
+        raise HTTPException(502, "Erro na API do Mercado Livre")
+    data = r.json()
+    results = []
+    for item in data.get("results", []):
+        rep = item.get("seller", {}).get("seller_reputation", {})
+        results.append({
+            "id": item["id"], "title": item["title"], "price": item["price"],
+            "currency": item.get("currency_id", "BRL"),
+            "condition": item.get("condition"),
+            "thumbnail": item.get("thumbnail"), "link": item.get("permalink"),
+            "seller": item.get("seller", {}).get("nickname"),
+            "sold": item.get("sold_quantity", 0),
+            "rating": item.get("reviews", {}).get("rating_average", 0),
+        })
+    sorted_results = sorted(results, key=lambda x: x["price"])
+    return {"results": results, "alternatives": sorted_results[:4],
+            "total": data.get("paging", {}).get("total", 0), "query": q}
 
-    for (let i = 0; i < images.length; i++) {
-      const img = images[i];
-      setProgress(`Processando imagem ${i + 1} de ${images.length} (${img.banco})...`);
+# ═══════════════════════════════════════════
+# BUSCA DE PRODUTOS — Mercado Livre
+# ═══════════════════════════════════════════
+class SearchReq(BaseModel):
+    query: str
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    condition: Optional[str] = "new"
+    limit: int = 12
 
-      try {
-        const base64 = await toBase64(img.file);
-        const media_type = img.file.type || 'image/png';
-        const result = await api.ocr({ image_base64: base64, banco: img.banco, media_type });
-        const txns = (result.transactions || []).map(t => ({
-          ...t,
-          _banco: img.banco,
-          _imgId: img.id
-        }));
-        allTransactions.push(...txns);
-      } catch (e) {
-        setError(`Erro na imagem ${i + 1}. Verifique se a imagem está nítida e tente novamente.`);
-      }
+@app.post("/api/search")
+def search_products(req: SearchReq):
+    params = {"q": req.query, "limit": req.limit}
+    if req.condition: params["condition"] = req.condition
+    if req.min_price:  params["price_min"] = req.min_price
+    if req.max_price:  params["price_max"] = req.max_price
+
+    r = requests.get("https://api.mercadolibre.com/sites/MLB/search",
+                     params=params, timeout=10)
+    if r.status_code != 200:
+        raise HTTPException(502, "Erro na API do Mercado Livre")
+
+    data = r.json()
+    results = []
+    for item in data.get("results", []):
+        rep = item.get("seller", {}).get("seller_reputation", {})
+        results.append({
+            "id":           item["id"],
+            "title":        item["title"],
+            "price":        item["price"],
+            "currency":     item.get("currency_id", "BRL"),
+            "condition":    item.get("condition"),
+            "thumbnail":    item.get("thumbnail"),
+            "link":         item.get("permalink"),
+            "seller":       item.get("seller", {}).get("nickname"),
+            "sold":         item.get("sold_quantity", 0),
+            "rating":       item.get("reviews", {}).get("rating_average", 0),
+            "rep_level":    rep.get("level_id", ""),
+        })
+
+    # Alternativas mais baratas (primeiros 4 resultados mais baratos)
+    sorted_results = sorted(results, key=lambda x: x["price"])
+    return {
+        "results":      results,
+        "alternatives": sorted_results[:4],
+        "total":        data.get("paging", {}).get("total", 0),
+        "query":        req.query
     }
 
-    setProgress('');
-    if (allTransactions.length > 0) {
-      setTransactions(allTransactions);
-    } else if (!error) {
-      setError('Nenhuma transação encontrada. Tente com imagens mais nítidas ou de melhor qualidade.');
+# ═══════════════════════════════════════════
+# CNPJ LOOKUP — Receita Federal (Brasil API)
+# ═══════════════════════════════════════════
+@app.get("/api/cnpj/{cnpj}")
+def cnpj_lookup(cnpj: str):
+    clean = "".join(filter(str.isdigit, cnpj))
+    if len(clean) != 14:
+        return {"name": None}
+    try:
+        r = requests.get(f"https://brasilapi.com.br/api/cnpj/v1/{clean}", timeout=5)
+        if r.status_code == 200:
+            d = r.json()
+            return {
+                "name":         d.get("razao_social"),
+                "fantasy_name": d.get("nome_fantasia"),
+                "cnpj":         clean
+            }
+    except Exception:
+        pass
+    return {"name": None, "cnpj": clean}
+
+# ═══════════════════════════════════════════
+# OCR — Extrato bancário via Claude Vision
+# ═══════════════════════════════════════════
+KNOWN_SUBSCRIPTIONS = [
+    "spotify","netflix","disney","amazon prime","youtube","hbo","globoplay",
+    "nubank","vidya","wellhub","gympass","anthropic","claude","rappi","ifood",
+    "apple","microsoft","adobe","canva","notion","slack","zoom"
+]
+
+KNOWN_INSTALLMENTS_KEYWORDS = ["parcela", "parc.", "/12","/10","/9","/8","/7","/6","/5","/4","/3","/2"]
+
+class OCRReq(BaseModel):
+    image_base64: str
+    banco: str        # "inter" | "nubank" | "itau" | "outro"
+    media_type: str = "image/jpeg"  # detectado no frontend
+
+@app.post("/api/ocr")
+def process_statement(req: OCRReq):
+    if not ANTHROPIC_KEY:
+        raise HTTPException(500, "Anthropic API não configurada")
+
+    bank_map = {
+        "inter":  "extrato do Banco Inter (banco digital laranja)",
+        "nubank": "extrato do Nubank PF ou PJ (banco digital roxo)",
+        "itau":   "extrato do Itaú (banco tradicional)",
+        "outro":  "extrato bancário"
     }
-    setLoading(false);
-  }
 
-  function toBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = e => resolve(e.target.result.split(',')[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  }
+    prompt = f"""Este é um {bank_map.get(req.banco, 'extrato bancário')} brasileiro.
 
-  function updateTxn(i, field, value) {
-    setTransactions(prev => prev.map((t, idx) => idx === i ? {...t, [field]: value} : t));
-  }
+Extraia TODAS as transações visíveis e retorne SOMENTE um JSON válido neste formato exato:
+{{
+  "transactions": [
+    {{
+      "date": "DD/MM/YYYY",
+      "description": "nome do estabelecimento ou descrição original",
+      "amount": 0.00,
+      "type": "debit",
+      "cnpj": null,
+      "category": "Alimentação",
+      "is_subscription": false,
+      "is_installment": false,
+      "installment_info": null
+    }}
+  ]
+}}
 
-  function removeTxn(i) {
-    setTransactions(prev => prev.filter((_, idx) => idx !== i));
-  }
+Regras obrigatórias:
+- type = "debit" para saídas (negativo para quem paga), "credit" para entradas
+- amount sempre positivo (o type indica direção)
+- Se houver CPF/CNPJ na descrição, coloque em cnpj
+- Categorias: Alimentação | Transporte | Saúde | Beleza | Roupas | Lazer | Suplementos | Tecnologia | Casa | Assinatura | Parcela | Transferência | Outros
+- is_subscription = true para serviços recorrentes (Spotify, Netflix, academias, etc)
+- is_installment = true se houver padrão X/Y na descrição
+- installment_info = "3/6" se for parcela 3 de 6, caso contrário null
+- Retorne SOMENTE o JSON, sem markdown, sem explicações"""
 
-  async function saveAll() {
-    setSaving(true);
-    try {
-      await api.saveTransactions({ transactions, banco });
-      setSavedMsg(`${transactions.length} transações salvas na planilha!`);
-      setTransactions(null);
-      setImages([]);
-    } catch {
-      setSavedMsg('Erro ao salvar. Tente novamente.');
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    msg = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=3000,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": req.media_type,
+                        "data": req.image_base64
+                    }
+                },
+                {"type": "text", "text": prompt}
+            ]
+        }]
+    )
+
+    raw = msg.content[0].text.strip()
+    # Remove markdown code blocks if present
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(500, "Não foi possível interpretar a resposta do OCR")
+
+    # Enrich: CNPJ lookup for unknown descriptions
+    for txn in result.get("transactions", []):
+        if txn.get("cnpj") and not txn.get("description_resolved"):
+            info = cnpj_lookup(txn["cnpj"])
+            if info.get("name"):
+                txn["description_resolved"] = info["name"]
+
+    return result
+
+# ═══════════════════════════════════════════
+# SALVAR TRANSAÇÕES DO EXTRATO
+# ═══════════════════════════════════════════
+class SaveTransactionsReq(BaseModel):
+    transactions: List[dict]
+    banco: str
+    date_range: Optional[str] = ""
+
+@app.post("/api/transactions/save")
+def save_transactions(req: SaveTransactionsReq):
+    sh = sheets()
+    month_name = financial_month_name()
+    headers = ["data","descricao","valor","tipo","categoria","assinatura","parcela","info_parcela","banco","cnpj","descricao_resolvida"]
+    ws = get_or_create_sheet(sh, month_name, headers)
+
+    rows = []
+    for t in req.transactions:
+        rows.append([
+            t.get("date", ""),
+            t.get("description", ""),
+            t.get("amount", 0),
+            t.get("type", "debit"),
+            t.get("category", "Outros"),
+            "Sim" if t.get("is_subscription") else "Não",
+            "Sim" if t.get("is_installment") else "Não",
+            t.get("installment_info", ""),
+            req.banco,
+            t.get("cnpj", ""),
+            t.get("description_resolved", "")
+        ])
+
+    ws.append_rows(rows)
+    return {"success": True, "saved": len(rows), "sheet": month_name}
+
+# ═══════════════════════════════════════════
+# HISTÓRICO DE COMPRAS (assistente de compras)
+# ═══════════════════════════════════════════
+COMPRAS_HEADERS = ["data","item","valor_pesquisado","valor_pago","loja","pagamento",
+                   "parcelas","categoria","maslow_nivel","maslow_nome","impulso","necessidade","notas"]
+
+class PurchaseReq(BaseModel):
+    date: str
+    item: str
+    value_searched: float
+    value_paid: float
+    store: str
+    payment: str
+    installments: int = 1
+    category: str
+    maslow_level: Optional[int] = None
+    maslow_name: Optional[str] = None
+    impulse: bool = False
+    need_level: str = "media"
+    notes: Optional[str] = ""
+    is_reposicao: bool = False
+
+@app.post("/api/purchase")
+def register_purchase(req: PurchaseReq):
+    sh = sheets()
+
+    # 1. Salvar em Compras
+    ws_compras = get_or_create_sheet(sh, "Compras", COMPRAS_HEADERS)
+    ws_compras.append_row([
+        req.date, req.item, req.value_searched, req.value_paid,
+        req.store, req.payment, req.installments, req.category,
+        req.maslow_level or "", req.maslow_name or "",
+        "Sim" if req.impulse else "Não", req.need_level, req.notes or ""
+    ])
+
+    # 2. Se parcelado, criar entradas futuras em Parcelamentos
+    future_installments = []
+    if req.installments > 1 and req.payment == "parcelado":
+        future_installments = _create_installments(sh, req)
+
+    return {
+        "success": True,
+        "message": "Compra registrada",
+        "future_installments": future_installments
     }
-    setSaving(false);
-    setTimeout(() => setSavedMsg(''), 4000);
-  }
 
-  return (
-    <div className="scroll fade-in" style={{ padding:16 }}>
+def _create_installments(sh, req: PurchaseReq):
+    PARC_HEADERS = ["id","produto","data_compra","valor_parcela","total_parcelas",
+                    "numero_parcela","mes_vencimento","status","cartao"]
+    ws = get_or_create_sheet(sh, "Parcelamentos", PARC_HEADERS)
 
-      <p style={{ fontSize:20, fontWeight:700, marginBottom:4 }}>Extrato da semana</p>
-      <p className="caption" style={{ marginBottom:16 }}>
-        Selecione uma ou várias imagens de extratos. Cada imagem pode ser de um banco diferente.
-      </p>
+    purchase_id = str(uuid.uuid4())[:8].upper()
+    valor_parc = round(req.value_paid / req.installments, 2)
+    purchase_date = datetime.strptime(req.date, "%d/%m/%Y")
+    meses_pt = ["Jan","Fev","Mar","Abr","Mai","Jun",
+                "Jul","Ago","Set","Out","Nov","Dez"]
 
-      {/* Banco padrão para novas imagens */}
-      <div className="card" style={{ marginBottom:14 }}>
-        <p className="label-sm" style={{ marginBottom:8 }}>Banco padrão ao adicionar imagens</p>
-        <div style={{ display:'flex', gap:8 }}>
-          {BANCOS.map(b => (
-            <button key={b.id} onClick={() => setBanco(b.id)} style={{
-              flex:1, padding:'8px 4px', borderRadius:10, border:'none',
-              background: banco === b.id ? b.color : 'var(--bg)',
-              color: banco === b.id ? '#fff' : 'var(--text-sec)',
-              fontWeight:600, fontSize:12, cursor:'pointer', transition:'all .15s'
-            }}>{b.label}</button>
-          ))}
-        </div>
-      </div>
+    rows = []
+    for i in range(req.installments):
+        month = purchase_date.month + i + 1
+        year = purchase_date.year
+        while month > 12:
+            month -= 12
+            year += 1
+        mes_venc = f"{meses_pt[month-1]}/{year}"
+        rows.append([
+            purchase_id,
+            f"{req.item} ({i+1}/{req.installments})",
+            req.date, valor_parc, req.installments, i+1,
+            mes_venc, "pendente", "Inter"
+        ])
 
-      {/* Upload area */}
-      <div
-        onClick={() => document.getElementById('file-input').click()}
-        onDragOver={e => e.preventDefault()}
-        onDrop={e => { e.preventDefault(); handleFiles(e.dataTransfer.files); }}
-        style={{
-          border: `2px dashed ${images.length ? 'var(--indigo)' : 'var(--border)'}`,
-          borderRadius:16, padding: images.length ? '14px' : '28px',
-          cursor:'pointer', marginBottom:14, background:'var(--card)',
-          textAlign: images.length ? 'left' : 'center', transition:'all .2s'
-        }}>
-        <input id="file-input" type="file" accept="image/*" multiple
-          style={{ display:'none' }}
-          onChange={e => handleFiles(e.target.files)} />
+    ws.append_rows(rows)
+    return [r[6] for r in rows]  # lista de meses de vencimento
 
-        {images.length === 0 ? (
-          <>
-            <div style={{ fontSize:36, marginBottom:8, opacity:.4 }}>📱</div>
-            <p style={{ fontSize:14, fontWeight:600, marginBottom:4 }}>
-              Toque para selecionar imagens
-            </p>
-            <p className="caption">Pode selecionar várias de uma vez — cada uma pode ser de um banco diferente</p>
-          </>
-        ) : (
-          <>
-            {/* Grid de previews */}
-            <div style={{ display:'flex', flexWrap:'wrap', gap:8, marginBottom:10 }}>
-              {images.map(img => (
-                <div key={img.id} style={{ position:'relative', width:80 }}>
-                  <img src={img.preview} alt="" style={{
-                    width:80, height:80, borderRadius:10, objectFit:'cover', display:'block'
-                  }} />
-                  {/* Badge banco */}
-                  <div style={{
-                    position:'absolute', bottom:2, left:2, right:2,
-                    background:'rgba(0,0,0,.6)', borderRadius:6, padding:'2px 4px',
-                    display:'flex', justifyContent:'space-between', alignItems:'center'
-                  }}>
-                    <select
-                      value={img.banco}
-                      onChange={e => { e.stopPropagation(); updateImageBanco(img.id, e.target.value); }}
-                      onClick={e => e.stopPropagation()}
-                      style={{
-                        background:'transparent', border:'none', color:'#fff',
-                        fontSize:9, padding:0, flex:1, cursor:'pointer'
-                      }}>
-                      {BANCOS.map(b => <option key={b.id} value={b.id}>{b.label}</option>)}
-                    </select>
-                    <span
-                      onClick={e => { e.stopPropagation(); removeImage(img.id); }}
-                      style={{ color:'#fff', fontSize:12, cursor:'pointer', paddingLeft:2 }}>✕</span>
-                  </div>
-                </div>
-              ))}
-              {/* Botão adicionar mais */}
-              <div style={{
-                width:80, height:80, borderRadius:10, border:'2px dashed var(--border)',
-                display:'flex', alignItems:'center', justifyContent:'center',
-                cursor:'pointer', color:'var(--text-ter)', fontSize:28
-              }} onClick={() => document.getElementById('file-input').click()}>+</div>
-            </div>
-            <p className="caption">{images.length} imagem(ns) selecionada(s) — toque em + para adicionar mais</p>
-          </>
-        )}
-      </div>
+# ═══════════════════════════════════════════
+# ALERTAS DE PREÇO
+# ═══════════════════════════════════════════
+ALERTS_HEADERS = ["id","produto","preco_alvo","preco_atual","ml_id","data_criacao","status"]
 
-      {/* Botão processar */}
-      {images.length > 0 && !transactions && (
-        <button className="btn btn-primary btn-full" style={{ marginBottom:14 }}
-          onClick={processAll} disabled={loading}>
-          {loading
-            ? <><div className="spinner" style={{ width:16, height:16, margin:'0 6px 0 0' }}/>
-                {progress || 'Processando...'}</>
-            : `Processar ${images.length} imagem${images.length > 1 ? 'ns' : ''} com IA`}
-        </button>
-      )}
+class AlertReq(BaseModel):
+    product_name: str
+    target_price: float
+    current_price: float
+    ml_id: Optional[str] = None
 
-      {error && (
-        <div style={{
-          background:'var(--red-light)', color:'var(--red)',
-          borderRadius:12, padding:14, fontSize:13, marginBottom:14
-        }}>{error}</div>
-      )}
+@app.post("/api/alerts")
+def create_alert(req: AlertReq):
+    sh = sheets()
+    ws = get_or_create_sheet(sh, "AlertasPreco", ALERTS_HEADERS)
+    alert_id = str(uuid.uuid4())[:8].upper()
+    ws.append_row([
+        alert_id, req.product_name, req.target_price,
+        req.current_price, req.ml_id or "",
+        datetime.now().strftime("%d/%m/%Y"), "ativo"
+    ])
+    return {"success": True, "alert_id": alert_id}
 
-      {/* Review das transações */}
-      {transactions && (
-        <div>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
-            <p style={{ fontSize:15, fontWeight:700 }}>
-              {transactions.length} transações encontradas
-            </p>
-            <span className="pill pill-indigo">Revise antes de salvar</span>
-          </div>
+@app.get("/api/alerts")
+def list_alerts():
+    sh = sheets()
+    try:
+        ws = sh.worksheet("AlertasPreco")
+        return {"alerts": ws.get_all_records()}
+    except gspread.WorksheetNotFound:
+        return {"alerts": []}
 
-          {/* Agrupar por banco */}
-          {BANCOS.filter(b => transactions.some(t => t._banco === b.id)).map(b => {
-            const txnsDoBanco = transactions.filter(t => t._banco === b.id);
-            return (
-              <div key={b.id} style={{ marginBottom:14 }}>
-                <p style={{
-                  fontSize:12, fontWeight:700, color: b.color,
-                  marginBottom:6, paddingLeft:2
-                }}>{b.label} — {txnsDoBanco.length} transações</p>
-                {txnsDoBanco.map((t, absIdx) => {
-                  const realIdx = transactions.indexOf(t);
-                  const isSub = KNOWN_SUBS.some(s => t.description?.toLowerCase().includes(s));
-                  return (
-                    <div key={realIdx} className="card" style={{
-                      marginBottom:8,
-                      borderLeft: `4px solid ${isSub || t.is_installment ? 'var(--amber)' : t.type === 'credit' ? 'var(--green)' : 'var(--indigo)'}`
-                    }}>
-                      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:8 }}>
-                        <div style={{ flex:1, minWidth:0 }}>
-                          <p style={{ fontSize:13, fontWeight:600, wordBreak:'break-word' }}>
-                            {t.description_resolved || t.description}
-                          </p>
-                          {t.date && <p className="caption">{t.date}</p>}
-                          <div style={{ display:'flex', gap:4, marginTop:4, flexWrap:'wrap' }}>
-                            {isSub && <span className="pill pill-amber" style={{ fontSize:10 }}>Assinatura</span>}
-                            {t.is_installment && <span className="pill pill-amber" style={{ fontSize:10 }}>Parcela {t.installment_info}</span>}
-                          </div>
-                        </div>
-                        <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:4, marginLeft:8 }}>
-                          <p style={{
-                            fontSize:15, fontWeight:700,
-                            color: t.type === 'credit' ? 'var(--green)' : 'var(--text)'
-                          }}>
-                            {t.type === 'credit' ? '+' : '-'} R$ {Number(t.amount).toFixed(2)}
-                          </p>
-                          <button onClick={() => removeTxn(realIdx)} style={{
-                            background:'transparent', border:'none', cursor:'pointer',
-                            color:'var(--text-ter)', fontSize:16
-                          }}>✕</button>
-                        </div>
-                      </div>
-                      <select className="input" style={{ fontSize:12, padding:'6px 10px' }}
-                        value={t.category || 'Outros'}
-                        onChange={e => updateTxn(realIdx, 'category', e.target.value)}>
-                        {CATS.map(c => <option key={c}>{c}</option>)}
-                      </select>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
+@app.post("/api/alerts/check")
+def check_price_alerts():
+    """Verificar se algum produto baixou de preço (chamado pelo scheduler)"""
+    sh = sheets()
+    try:
+        ws = sh.worksheet("AlertasPreco")
+    except gspread.WorksheetNotFound:
+        return {"checked": 0, "triggered": 0}
 
-          <div style={{
-            background:'var(--indigo-light)', borderRadius:12,
-            padding:'10px 14px', marginBottom:12, fontSize:12, color:'var(--indigo)'
-          }}>
-            Assinaturas e parcelas são marcadas automaticamente para não duplicar no orçamento variável.
-          </div>
+    records = ws.get_all_records()
+    triggered = []
 
-          <button className="btn btn-primary btn-full"
-            onClick={saveAll} disabled={saving} style={{ marginBottom:8 }}>
-            {saving
-              ? <><div className="spinner" style={{ width:16, height:16, margin:'0 6px 0 0' }}/>Salvando...</>
-              : `Confirmar e salvar ${transactions.length} transações`}
-          </button>
-          <button className="btn btn-full" style={{ background:'var(--bg)', color:'var(--text-sec)' }}
-            onClick={() => { setTransactions(null); setImages([]); }}>
-            Cancelar e recomeçar
-          </button>
-        </div>
-      )}
+    for i, alert in enumerate(records):
+        if alert.get("status") != "ativo" or not alert.get("ml_id"):
+            continue
+        try:
+            r = requests.get(f"https://api.mercadolibre.com/items/{alert['ml_id']}", timeout=5)
+            if r.status_code == 200:
+                current = r.json().get("price", 0)
+                if current <= float(alert["preco_alvo"]):
+                    triggered.append({
+                        "product": alert["produto"],
+                        "target": alert["preco_alvo"],
+                        "current": current,
+                        "ml_id": alert["ml_id"]
+                    })
+                    ws.update_cell(i + 2, 7, "disparado")
+                else:
+                    ws.update_cell(i + 2, 4, current)
+        except Exception:
+            pass
 
-      {savedMsg && (
-        <div style={{
-          background:'var(--green-light)', color:'var(--green)',
-          borderRadius:12, padding:'14px 16px', marginTop:12,
-          fontSize:14, fontWeight:600, textAlign:'center'
-        }}>{savedMsg}</div>
-      )}
-    </div>
-  );
+    if triggered and SENDGRID_KEY:
+        _send_price_alert_email(triggered)
+
+    return {"checked": len(records), "triggered": len(triggered)}
+
+def _send_price_alert_email(alerts: list):
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import Mail
+    items_html = "".join([
+        f"<li><strong>{a['product']}</strong> — agora R$ {a['current']:.2f} "
+        f"(sua meta era R$ {a['target']:.2f})</li>"
+        for a in alerts
+    ])
+    msg = Mail(
+        from_email=FROM_EMAIL,
+        to_emails=FROM_EMAIL,
+        subject=f"🎯 Jade Finance — {len(alerts)} produto(s) baixaram de preço!",
+        html_content=f"""
+        <h2>Alerta de preço ativado!</h2>
+        <p>Os seguintes produtos atingiram o preço que você definiu:</p>
+        <ul>{items_html}</ul>
+        <p><a href="https://jade-finance.vercel.app">Abrir Jade Finance</a></p>
+        """
+    )
+    try:
+        sg = SendGridAPIClient(SENDGRID_KEY)
+        sg.send(msg)
+    except Exception as e:
+        print(f"SendGrid error: {e}")
+
+# ═══════════════════════════════════════════
+# CONFIGURAÇÕES
+# ═══════════════════════════════════════════
+DEFAULT_CONFIG = {
+    "renda_mensal": 7364,
+    "budget_var": 1000,
+    "gasto_var": 0,
+    "limite_inter_total": 11370,
+    "limite_inter_bloqueado": 7141.17,
+    "assinaturas_total": 937.25,
+    "meta_reserva": 14000,
+    "reserva_atual": 800,
+    "mes_financeiro_dia": 5,
+    "livelo_amazon": 1.5,
+    "livelo_magalu": 2.0,
+    "livelo_americanas": 1.5,
+    "livelo_casasbahia": 2.0,
+    "livelo_ponto": 2.0,
+    "livelo_shopee": 0.5,
+    "livelo_kabum": 1.0,
+    "livelo_ml": 1.0,
 }
+
+@app.get("/api/config")
+def get_config():
+    try:
+        sh = sheets()
+        try:
+            ws = sh.worksheet("Configuracoes")
+            records = ws.get_all_records()
+            if records:
+                return {"config": records[0]}
+        except gspread.WorksheetNotFound:
+            pass
+    except Exception:
+        pass
+    return {"config": DEFAULT_CONFIG}
+
+class ConfigUpdateReq(BaseModel):
+    config: dict
+
+@app.post("/api/config")
+def update_config(req: ConfigUpdateReq):
+    sh = sheets()
+    try:
+        ws = sh.worksheet("Configuracoes")
+        ws.clear()
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Configuracoes", rows=5, cols=30)
+    ws.append_row(list(req.config.keys()))
+    ws.append_row(list(req.config.values()))
+    return {"success": True}
+
+# ═══════════════════════════════════════════
+# LEITURA DO PAINEL (dados do mês atual)
+# ═══════════════════════════════════════════
+@app.get("/api/dashboard")
+def get_dashboard():
+    sh = sheets()
+    month_name = financial_month_name()
+
+    # Transações do mês
+    transactions = []
+    try:
+        ws = sh.worksheet(month_name)
+        transactions = ws.get_all_records()
+    except gspread.WorksheetNotFound:
+        pass
+
+    # Parcelamentos
+    parcelamentos = []
+    try:
+        ws_p = sh.worksheet("Parcelamentos")
+        parcelamentos = ws_p.get_all_records()
+    except gspread.WorksheetNotFound:
+        pass
+
+    # Config
+    config_data = get_config()["config"]
+
+    # Cálculos
+    debits = [t for t in transactions if t.get("tipo") == "debit"
+              and t.get("assinatura") != "Sim" and t.get("parcela") != "Sim"]
+    total_var = sum(float(t.get("valor", 0)) for t in debits)
+
+    spending_by_category = {}
+    for t in debits:
+        cat = t.get("categoria", "Outros")
+        spending_by_category[cat] = spending_by_category.get(cat, 0) + float(t.get("valor", 0))
+
+    return {
+        "month": month_name,
+        "config": config_data,
+        "total_variable_spending": round(total_var, 2),
+        "spending_by_category": spending_by_category,
+        "transactions_count": len(transactions),
+        "parcelamentos": parcelamentos,
+    }
+
+# ═══════════════════════════════════════════
+# RELATÓRIO MENSAL — disparado no dia 6
+# ═══════════════════════════════════════════
+@app.post("/api/report/monthly")
+def generate_monthly_report():
+    dashboard = get_dashboard()
+    config = dashboard["config"]
+
+    spent = dashboard["total_variable_spending"]
+    budget = float(config.get("budget_var", 1000))
+    income = float(config.get("renda_mensal", 7364))
+    saved = income - spent
+
+    html = f"""
+    <h1 style="color:#4F46E5">Jade Finance — Relatório {dashboard['month']}</h1>
+    <hr>
+    <h2>Resumo financeiro</h2>
+    <ul>
+      <li><strong>Renda:</strong> R$ {income:,.2f}</li>
+      <li><strong>Gastos variáveis:</strong> R$ {spent:,.2f} de R$ {budget:,.2f} ({spent/budget*100:.0f}%)</li>
+      <li><strong>Resultado:</strong> R$ {saved:,.2f}</li>
+    </ul>
+    <h2>Gastos por categoria</h2>
+    <ul>
+      {''.join(f"<li>{cat}: R$ {val:,.2f}</li>" for cat,val in dashboard['spending_by_category'].items())}
+    </ul>
+    <p style="color:#6B7280;font-size:12px">Gerado automaticamente pelo Jade Finance</p>
+    """
+
+    if SENDGRID_KEY:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail
+        msg = Mail(
+            from_email=FROM_EMAIL,
+            to_emails=FROM_EMAIL,
+            subject=f"📊 Jade Finance — Relatório de {dashboard['month']}",
+            html_content=html
+        )
+        try:
+            sg = SendGridAPIClient(SENDGRID_KEY)
+            sg.send(msg)
+        except Exception as e:
+            print(f"Email error: {e}")
+
+    return {"success": True, "month": dashboard["month"]}
+
+# ═══════════════════════════════════════════
+# SCHEDULER — rodar no Render.com com startup event
+# ═══════════════════════════════════════════
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+scheduler = BackgroundScheduler()
+
+# Toda segunda às 8h: verificar alertas de preço
+scheduler.add_job(check_price_alerts, CronTrigger(day_of_week="mon", hour=8))
+
+# Todo dia 6 às 9h: relatório mensal
+scheduler.add_job(generate_monthly_report, CronTrigger(day=6, hour=9))
+
+@app.on_event("startup")
+def start_scheduler():
+    scheduler.start()
+
+@app.on_event("shutdown")
+def stop_scheduler():
+    scheduler.shutdown()
